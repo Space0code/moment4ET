@@ -21,7 +21,7 @@
 
 ## Conda environment
 - We always use conda environments.
-- When using python, first activate conda environment named `moment`.
+- When using python, first activate conda environment named `moment4ET`.
 
 ## Hardware
 - I have NVIDIA GeForce RTX 4070 with 12282MiB memory
