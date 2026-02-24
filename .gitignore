@@ -1,3 +1,17 @@
+# For Trust ME
+trustME/data
+
+
+
+
+
+
+
+
+################################
+# from MOMENT
+################################
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
