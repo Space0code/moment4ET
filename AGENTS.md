@@ -20,6 +20,7 @@
 - Prefer readable vectorization over premature optimization
 - When plotting confusion matrices, we should normalize each row to show per-class percentages (values between 0.0 and 1.0) and fix the color scale to the [0, 1] range.
 - When creating new python scripts that are meant to be run from terminal, add a concise docstring in the beginning of the script explaining and providing an example on how to run the script and what are the running options. 
+- Ask questions.
 
 ## Conda environment
 - We always use conda environments.
