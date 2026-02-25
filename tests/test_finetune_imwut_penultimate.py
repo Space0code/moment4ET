@@ -234,6 +234,13 @@ def _build_args(input_dir: Path, out_dir: Path, schemes: tuple[str, ...]) -> Sim
         seed=7,
         device="cpu",
         num_workers=0,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
+        non_blocking=True,
+        use_amp=True,
+        amp_dtype="bf16",
+        enable_tf32=True,
         subject_train_frac=0.70,
         subject_val_frac=0.15,
         subject_test_frac=0.15,
@@ -409,3 +416,75 @@ def test_trainable_only_checkpoint_roundtrip(
     )
     loaded_keys = module.load_trainable_only_checkpoint(fresh_model, model_path)
     assert loaded_keys
+
+
+def test_inference_casts_bfloat16_outputs_to_float32() -> None:
+    module = _load_module()
+
+    class Bf16OutputModel(torch.nn.Module):
+        def forward(
+            self,
+            *,
+            x_enc: torch.Tensor,
+            input_mask: torch.Tensor | None = None,
+            reduction: str = "mean",
+        ) -> SimpleNamespace:
+            _ = input_mask
+            _ = reduction
+            batch = x_enc.shape[0]
+            logits = torch.zeros((batch, 3), dtype=torch.bfloat16, device=x_enc.device)
+            logits[:, 0] = 1
+            return SimpleNamespace(logits=logits)
+
+        def embed(
+            self,
+            *,
+            x_enc: torch.Tensor,
+            input_mask: torch.Tensor | None = None,
+            reduction: str = "mean",
+        ) -> SimpleNamespace:
+            _ = input_mask
+            _ = reduction
+            batch = x_enc.shape[0]
+            emb = torch.ones((batch, 8), dtype=torch.bfloat16, device=x_enc.device)
+            return SimpleNamespace(embeddings=emb)
+
+    x = np.random.randn(5, 4, 16).astype(np.float32)
+    m = np.ones((5, 16), dtype=np.int64)
+    y = np.asarray([0, 1, 2, 1, 0], dtype=np.int64)
+    idx = np.arange(5, dtype=np.int64)
+
+    loader = module._make_dataloader(
+        x=x,
+        input_mask=m,
+        labels=y,
+        indices=idx,
+        batch_size=2,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+        prefetch_factor=None,
+    )
+
+    model = Bf16OutputModel()
+    head_out = module._run_head_inference(
+        model=model,
+        loader=loader,
+        device="cpu",
+        non_blocking=False,
+        use_amp=False,
+        amp_dtype=torch.bfloat16,
+    )
+    emb_out = module._run_embed_inference(
+        model=model,
+        loader=loader,
+        device="cpu",
+        non_blocking=False,
+        use_amp=False,
+        amp_dtype=torch.bfloat16,
+    )
+
+    assert head_out["logits"].dtype == np.float32
+    assert head_out["probs"].dtype == np.float32
+    assert emb_out["embeddings"].dtype == np.float32

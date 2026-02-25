@@ -25,6 +25,7 @@ import json
 import logging
 import random
 import warnings
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,13 @@ class TrainConfig:
     seed: int = 42
     device: str = "auto"
     num_workers: int = 0
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    prefetch_factor: int | None = 2
+    non_blocking: bool = True
+    use_amp: bool = True
+    amp_dtype: str = "bf16"
+    enable_tf32: bool = True
     schemes: tuple[str, ...] = ("binary", "edr", "avm")
     subject_train_frac: float = 0.70
     subject_val_frac: float = 0.15
@@ -156,6 +164,25 @@ def _resolve_device(device: str) -> str:
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return device
+
+
+def _resolve_amp_dtype(amp_dtype: str) -> torch.dtype:
+    """Resolve AMP dtype string to torch dtype."""
+    amp_dtype_lower = amp_dtype.strip().lower()
+    if amp_dtype_lower == "bf16":
+        return torch.bfloat16
+    if amp_dtype_lower == "fp16":
+        return torch.float16
+    raise ValueError(f"Unsupported amp_dtype={amp_dtype}. Supported: ['bf16', 'fp16']")
+
+
+def _configure_tf32(enable_tf32: bool, device: str) -> None:
+    """Configure TF32 backend flags when CUDA is used."""
+    if not device.startswith("cuda"):
+        return
+    torch.backends.cuda.matmul.allow_tf32 = bool(enable_tf32)
+    torch.backends.cudnn.allow_tf32 = bool(enable_tf32)
+    LOGGER.info("TF32 enabled=%s", bool(enable_tf32))
 
 
 def _sha256_file(path: Path) -> str:
@@ -468,6 +495,9 @@ def _make_dataloader(
     batch_size: int,
     shuffle: bool,
     num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
+    prefetch_factor: int | None,
 ) -> DataLoader:
     dataset = TensorDataset(
         torch.from_numpy(x[indices]).float(),
@@ -475,11 +505,28 @@ def _make_dataloader(
         torch.from_numpy(labels[indices]).long(),
         torch.from_numpy(indices).long(),
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    dataloader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        dataloader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            dataloader_kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(dataset, **dataloader_kwargs)
 
 
 @torch.no_grad()
-def _run_head_inference(model: Any, loader: DataLoader, device: str) -> dict[str, np.ndarray]:
+def _run_head_inference(
+    model: Any,
+    loader: DataLoader,
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> dict[str, np.ndarray]:
     model.eval()
     idx_out: list[np.ndarray] = []
     logits_out: list[np.ndarray] = []
@@ -488,14 +535,24 @@ def _run_head_inference(model: Any, loader: DataLoader, device: str) -> dict[str
     y_out: list[np.ndarray] = []
 
     for x_batch, mask_batch, y_batch, idx_batch in loader:
-        output = model(x_enc=x_batch.to(device), input_mask=mask_batch.to(device), reduction="mean")
-        logits = output.logits.detach().cpu().numpy()
-        probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
+        with (
+            torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp and device.startswith("cuda"))
+            if device.startswith("cuda")
+            else nullcontext()
+        ):
+            output = model(
+                x_enc=x_batch.to(device, non_blocking=non_blocking),
+                input_mask=mask_batch.to(device, non_blocking=non_blocking),
+                reduction="mean",
+            )
+        logits_tensor = output.logits.detach().float()
+        logits = logits_tensor.cpu().numpy().astype(np.float32, copy=False)
+        probs = torch.softmax(logits_tensor, dim=1).cpu().numpy().astype(np.float32, copy=False)
         pred = np.argmax(probs, axis=1).astype(np.int64)
 
         idx_out.append(idx_batch.cpu().numpy())
-        logits_out.append(logits.astype(np.float32))
-        probs_out.append(probs.astype(np.float32))
+        logits_out.append(logits)
+        probs_out.append(probs)
         pred_out.append(pred)
         y_out.append(y_batch.cpu().numpy().astype(np.int64))
 
@@ -511,13 +568,29 @@ def _run_head_inference(model: Any, loader: DataLoader, device: str) -> dict[str
 
 
 @torch.no_grad()
-def _run_embed_inference(model: Any, loader: DataLoader, device: str) -> dict[str, np.ndarray]:
+def _run_embed_inference(
+    model: Any,
+    loader: DataLoader,
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> dict[str, np.ndarray]:
     model.eval()
     idx_out: list[np.ndarray] = []
     emb_out: list[np.ndarray] = []
     for x_batch, mask_batch, _, idx_batch in loader:
-        output = model.embed(x_enc=x_batch.to(device), input_mask=mask_batch.to(device), reduction="mean")
-        emb = output.embeddings.detach().cpu().numpy().astype(np.float32)
+        with (
+            torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp and device.startswith("cuda"))
+            if device.startswith("cuda")
+            else nullcontext()
+        ):
+            output = model.embed(
+                x_enc=x_batch.to(device, non_blocking=non_blocking),
+                input_mask=mask_batch.to(device, non_blocking=non_blocking),
+                reduction="mean",
+            )
+        emb = output.embeddings.detach().float().cpu().numpy().astype(np.float32, copy=False)
         idx_out.append(idx_batch.cpu().numpy())
         emb_out.append(emb)
     idx = np.concatenate(idx_out, axis=0)
@@ -561,6 +634,24 @@ def train_one_scheme(
     """Train one scheme model and return metrics, outputs, and weights."""
     _seed_everything(config.seed)
     device = _resolve_device(config.device)
+    amp_dtype = _resolve_amp_dtype(config.amp_dtype)
+    amp_enabled = bool(config.use_amp and device.startswith("cuda"))
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and amp_dtype == torch.float16)
+    effective_pin_memory = bool(config.pin_memory and device.startswith("cuda"))
+    LOGGER.info(
+        "Runtime options | device=%s amp=%s amp_dtype=%s tf32=%s pin_memory=%s persistent_workers=%s prefetch_factor=%s non_blocking=%s",
+        device,
+        amp_enabled,
+        config.amp_dtype,
+        config.enable_tf32,
+        effective_pin_memory,
+        config.persistent_workers,
+        config.prefetch_factor,
+        config.non_blocking,
+    )
     model, trainable_names, selected_blocks = build_moment_model(
         head_type=config.head_type,
         num_classes=int(np.max(labels)) + 1,
@@ -581,6 +672,9 @@ def train_one_scheme(
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=config.persistent_workers,
+        prefetch_factor=config.prefetch_factor,
     )
     val_loader = _make_dataloader(
         x=x,
@@ -590,6 +684,9 @@ def train_one_scheme(
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=config.persistent_workers,
+        prefetch_factor=config.prefetch_factor,
     )
     test_loader = _make_dataloader(
         x=x,
@@ -599,6 +696,9 @@ def train_one_scheme(
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=config.persistent_workers,
+        prefetch_factor=config.prefetch_factor,
     )
     full_loader = _make_dataloader(
         x=x,
@@ -608,6 +708,9 @@ def train_one_scheme(
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=config.persistent_workers,
+        prefetch_factor=config.prefetch_factor,
     )
 
     class_count = np.bincount(labels[split_indices.train_idx], minlength=int(np.max(labels)) + 1).astype(np.float32)
@@ -621,11 +724,17 @@ def train_one_scheme(
 
     first_batch = next(iter(train_loader))
     with torch.no_grad():
-        _ = model(
-            x_enc=first_batch[0].to(device),
-            input_mask=first_batch[1].to(device),
-            reduction="mean",
+        warmup_ctx = (
+            torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+            if device.startswith("cuda")
+            else nullcontext()
         )
+        with warmup_ctx:
+            _ = model(
+                x_enc=first_batch[0].to(device, non_blocking=config.non_blocking),
+                input_mask=first_batch[1].to(device, non_blocking=config.non_blocking),
+                reduction="mean",
+            )
 
     best_val = -1.0
     best_epoch = 0
@@ -637,13 +746,36 @@ def train_one_scheme(
         loss_values: list[float] = []
         for x_batch, mask_batch, y_batch, _ in train_loader:
             optimizer.zero_grad()
-            output = model(x_enc=x_batch.to(device), input_mask=mask_batch.to(device), reduction="mean")
-            loss = criterion(output.logits, y_batch.to(device))
-            loss.backward()
-            optimizer.step()
+            autocast_ctx = (
+                torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+                if device.startswith("cuda")
+                else nullcontext()
+            )
+            with autocast_ctx:
+                output = model(
+                    x_enc=x_batch.to(device, non_blocking=config.non_blocking),
+                    input_mask=mask_batch.to(device, non_blocking=config.non_blocking),
+                    reduction="mean",
+                )
+                loss = criterion(output.logits, y_batch.to(device, non_blocking=config.non_blocking))
+
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             loss_values.append(float(loss.detach().cpu().item()))
 
-        val_out = _run_head_inference(model=model, loader=val_loader, device=device)
+        val_out = _run_head_inference(
+            model=model,
+            loader=val_loader,
+            device=device,
+            non_blocking=config.non_blocking,
+            use_amp=amp_enabled,
+            amp_dtype=amp_dtype,
+        )
         val_metrics = _classification_metrics(
             y_true=val_out["y_true"],
             y_pred=val_out["pred"],
@@ -671,11 +803,46 @@ def train_one_scheme(
 
     model.load_state_dict(best_state)
 
-    train_out = _run_head_inference(model=model, loader=train_loader, device=device)
-    val_out = _run_head_inference(model=model, loader=val_loader, device=device)
-    test_out = _run_head_inference(model=model, loader=test_loader, device=device)
-    full_head_out = _run_head_inference(model=model, loader=full_loader, device=device)
-    full_embed_out = _run_embed_inference(model=model, loader=full_loader, device=device)
+    train_out = _run_head_inference(
+        model=model,
+        loader=train_loader,
+        device=device,
+        non_blocking=config.non_blocking,
+        use_amp=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
+    val_out = _run_head_inference(
+        model=model,
+        loader=val_loader,
+        device=device,
+        non_blocking=config.non_blocking,
+        use_amp=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
+    test_out = _run_head_inference(
+        model=model,
+        loader=test_loader,
+        device=device,
+        non_blocking=config.non_blocking,
+        use_amp=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
+    full_head_out = _run_head_inference(
+        model=model,
+        loader=full_loader,
+        device=device,
+        non_blocking=config.non_blocking,
+        use_amp=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
+    full_embed_out = _run_embed_inference(
+        model=model,
+        loader=full_loader,
+        device=device,
+        non_blocking=config.non_blocking,
+        use_amp=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
 
     metrics = {
         "best_epoch": int(best_epoch),
@@ -795,6 +962,59 @@ def _load_cached_inputs(input_dir: Path) -> tuple[np.ndarray, np.ndarray, pd.Dat
     return x, input_mask, kept_aligned
 
 
+def _log_loaded_dataset_sanity(metadata: pd.DataFrame) -> None:
+    """Log high-level sanity statistics for the aligned canonical dataset."""
+    n_segments = int(metadata.shape[0])
+    n_subjects = int(metadata["Subject"].astype(str).nunique()) if "Subject" in metadata.columns else 0
+
+    if "Label" not in metadata.columns:
+        LOGGER.warning(
+            "Loaded canonical dataset: n_segments=%d, n_subjects=%d, missing `Label` column.",
+            n_segments,
+            n_subjects,
+        )
+        return
+
+    label_counts = metadata["Label"].dropna().astype(str).value_counts(sort=False).sort_index()
+    n_source_labels = int(label_counts.shape[0])
+
+    LOGGER.info(
+        "Loaded canonical dataset: n_segments=%d, n_subjects=%d, n_source_labels=%d",
+        n_segments,
+        n_subjects,
+        n_source_labels,
+    )
+    LOGGER.info("Source label counts:")
+    for label, count in label_counts.items():
+        LOGGER.info("  %s: %d", label, int(count))
+
+
+def _log_scheme_label_counts_once(
+    scheme_df: pd.DataFrame,
+    scheme: str,
+    source_total_count: int,
+) -> None:
+    """Log one concise summary of scheme-label counts after subset selection."""
+    n_samples = int(scheme_df.shape[0])
+    n_subjects = int(scheme_df["Subject"].astype(str).nunique()) if "Subject" in scheme_df.columns else 0
+    scheme_counts = (
+        scheme_df["scheme_label"].dropna().astype(str).value_counts(sort=False).sort_index()
+        if "scheme_label" in scheme_df.columns
+        else pd.Series(dtype=np.int64)
+    )
+    LOGGER.info(
+        "Scheme dataset (%s): n_samples=%d (source_total=%d), n_subjects=%d, n_scheme_labels=%d",
+        scheme,
+        n_samples,
+        int(source_total_count),
+        n_subjects,
+        int(scheme_counts.shape[0]),
+    )
+    LOGGER.info("Scheme label counts (%s):", scheme)
+    for label, count in scheme_counts.items():
+        LOGGER.info("  %s: %d ", label, int(count))
+
+
 def _parse_csv_list(raw: str) -> tuple[str, ...]:
     values = tuple([part.strip() for part in raw.split(",") if part.strip()])
     if not values:
@@ -839,6 +1059,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     """Run per-scheme fine-tuning and artifact export pipeline."""
     _seed_everything(args.seed)
     x, input_mask, metadata = _load_cached_inputs(args.input_dir)
+    _log_loaded_dataset_sanity(metadata)
+    canonical_source_total = int(metadata.shape[0])
 
     config = TrainConfig(
         model_name=args.model_name,
@@ -850,6 +1072,13 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         seed=args.seed,
         device=args.device,
         num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
+        prefetch_factor=args.prefetch_factor,
+        non_blocking=args.non_blocking,
+        use_amp=args.use_amp,
+        amp_dtype=args.amp_dtype,
+        enable_tf32=args.enable_tf32,
         schemes=args.schemes,
         subject_train_frac=args.subject_train_frac,
         subject_val_frac=args.subject_val_frac,
@@ -868,6 +1097,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         save_metrics=args.save_metrics,
         save_predictions=args.save_predictions,
     )
+    runtime_device = _resolve_device(config.device)
+    _configure_tf32(enable_tf32=config.enable_tf32, device=runtime_device)
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -898,6 +1129,11 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         )
         if subset_idx.size < scheme_df.shape[0]:
             scheme_df = scheme_df.iloc[subset_idx].reset_index(drop=True)
+        _log_scheme_label_counts_once(
+            scheme_df=scheme_df,
+            scheme=scheme,
+            source_total_count=canonical_source_total,
+        )
 
         scheme_row_idx = scheme_df["row_idx"].to_numpy(dtype=np.int64)
         x_scheme = x[scheme_row_idx]
@@ -998,6 +1234,43 @@ def build_arg_parser(
     parser.add_argument("--seed", type=int, default=int(_config_value(defaults, "seed", 42)))
     parser.add_argument("--device", type=str, default=str(_config_value(defaults, "device", "auto")))
     parser.add_argument("--num-workers", type=int, default=int(_config_value(defaults, "num_workers", 0)))
+    parser.add_argument(
+        "--pin-memory",
+        dest="pin_memory",
+        action="store_true",
+        default=bool(_config_value(defaults, "pin_memory", True)),
+    )
+    parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false")
+    parser.add_argument(
+        "--persistent-workers",
+        dest="persistent_workers",
+        action="store_true",
+        default=bool(_config_value(defaults, "persistent_workers", True)),
+    )
+    parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false")
+    parser.add_argument("--prefetch-factor", type=int, default=_config_value(defaults, "prefetch_factor", 2))
+    parser.add_argument(
+        "--non-blocking",
+        dest="non_blocking",
+        action="store_true",
+        default=bool(_config_value(defaults, "non_blocking", True)),
+    )
+    parser.add_argument("--no-non-blocking", dest="non_blocking", action="store_false")
+    parser.add_argument(
+        "--use-amp",
+        dest="use_amp",
+        action="store_true",
+        default=bool(_config_value(defaults, "use_amp", True)),
+    )
+    parser.add_argument("--no-use-amp", dest="use_amp", action="store_false")
+    parser.add_argument("--amp-dtype", type=str, choices=["bf16", "fp16"], default=str(_config_value(defaults, "amp_dtype", "bf16")))
+    parser.add_argument(
+        "--enable-tf32",
+        dest="enable_tf32",
+        action="store_true",
+        default=bool(_config_value(defaults, "enable_tf32", True)),
+    )
+    parser.add_argument("--disable-tf32", dest="enable_tf32", action="store_false")
     parser.add_argument("--subject-train-frac", type=float, default=float(_config_value(defaults, "subject_train_frac", 0.70)))
     parser.add_argument("--subject-val-frac", type=float, default=float(_config_value(defaults, "subject_val_frac", 0.15)))
     parser.add_argument("--subject-test-frac", type=float, default=float(_config_value(defaults, "subject_test_frac", 0.15)))

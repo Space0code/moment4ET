@@ -19,6 +19,13 @@ weight_decay: 0.0001 # float >= 0
 seed: 42 # int
 device: auto # "auto" | "cpu" | "cuda"
 num_workers: 4 # int >= 0 (PyTorch DataLoader workers)
+pin_memory: true # true | false (recommended true for CUDA input pipeline)
+persistent_workers: true # true | false (effective only when num_workers > 0)
+prefetch_factor: 2 # int >= 1 or null (effective only when num_workers > 0)
+non_blocking: true # true | false (used in tensor .to(device, non_blocking=...))
+use_amp: true # true | false (AMP used only on CUDA)
+amp_dtype: bf16 # "bf16" | "fp16" (used when use_amp: true and device is CUDA)
+enable_tf32: true # true | false (applies on CUDA matmul/cudnn backends)
 
 subject_train_frac: 0.70 # float in (0,1); train+val+test must sum to 1.0
 subject_val_frac: 0.15 # float in (0,1)
