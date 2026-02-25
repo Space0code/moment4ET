@@ -211,6 +211,18 @@ def test_split_subject_holdout_is_deterministic_and_disjoint() -> None:
     assert val_subjects.isdisjoint(test_subjects)
 
 
+def test_stratified_subset_keeps_each_class() -> None:
+    module = _load_module()
+    labels = np.asarray(["a"] * 50 + ["b"] * 30 + ["c"] * 20, dtype=object)
+    idx = module._stratified_subset_indices(labels=labels, fraction=0.2, seed=13, min_per_class=2)
+    chosen = labels[idx]
+    counts = {label: int((chosen == label).sum()) for label in np.unique(chosen)}
+    assert counts["a"] >= 2
+    assert counts["b"] >= 2
+    assert counts["c"] >= 2
+    assert len(idx) < len(labels)
+
+
 def test_build_moment_model_freezes_encoder_and_keeps_head_trainable(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_module()
     _install_fake_moment(monkeypatch)
@@ -316,3 +328,65 @@ def test_end_to_end_smoke_dual_head_export_and_best_marker(
         assert linear_head["segment_id"].shape == mlp_head["segment_id"].shape
         assert linear_head["label_int"].shape == mlp_head["label_int"].shape
         assert set(np.unique(linear_head["split"].astype(str))) <= {"train", "val", "test"}
+
+
+def test_end_to_end_respects_save_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    _install_fake_moment(monkeypatch)
+
+    input_dir = tmp_path / "processed"
+    out_dir = tmp_path / "out_no_save"
+    _write_synthetic_processed_dataset(input_dir)
+
+    rc = module.main(
+        [
+            "--input-dir",
+            str(input_dir),
+            "--out-dir",
+            str(out_dir),
+            "--device",
+            "cpu",
+            "--epochs",
+            "1",
+            "--patience",
+            "1",
+            "--batch-size",
+            "8",
+            "--num-workers",
+            "0",
+            "--seed",
+            "11",
+            "--schemes",
+            "binary",
+            "--head-types",
+            "linear,mlp",
+            "--mlp-hidden-dim",
+            "16",
+            "--no-save-model",
+            "--no-save-metrics",
+            "--no-save-base-embeddings",
+            "--no-save-head-features",
+        ]
+    )
+    assert rc == 0
+
+    scheme_dir = out_dir / "binary"
+    assert not (scheme_dir / "linear" / "model.pt").exists()
+    assert not (scheme_dir / "linear" / "head_features.npz").exists()
+    assert not (scheme_dir / "linear" / "base_embeddings.npz").exists()
+    assert not (scheme_dir / "linear" / "metrics.json").exists()
+    assert not (scheme_dir / "mlp" / "model.pt").exists()
+    assert not (scheme_dir / "mlp" / "head_features.npz").exists()
+    assert not (scheme_dir / "mlp" / "base_embeddings.npz").exists()
+    assert not (scheme_dir / "mlp" / "metrics.json").exists()
+    assert not (scheme_dir / "best_model.pt").exists()
+    assert not (scheme_dir / "best_head_features.npz").exists()
+    assert not (scheme_dir / "best_base_embeddings.npz").exists()
+    assert (scheme_dir / "best_head.json").exists()
+
+    payload = json.loads((scheme_dir / "best_head.json").read_text())
+    assert payload["artifacts"]["best_model"] is None
+    assert payload["artifacts"]["best_head_features"] is None
+    assert payload["artifacts"]["best_base_embeddings"] is None
