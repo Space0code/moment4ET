@@ -2,6 +2,29 @@
 
 This module trains frozen-encoder MOMENT classification heads for multiple
 labeling schemes and exports features for both head architectures.
+
+How to run:
+
+# Full profile
+`
+python trustME/source/finetune_imwut_heads.py \
+  --config trustME/configs/finetune_imwut_heads.full.yaml
+`
+
+# Fast stratified subset profile
+`
+python trustME/source/finetune_imwut_heads.py \
+  --config trustME/configs/finetune_imwut_heads.quick_subset.yaml
+`
+
+# Override one thing from CLI (example)
+`
+python trustME/source/finetune_imwut_heads.py \
+  --config trustME/configs/finetune_imwut_heads.quick_subset.yaml \
+  --subset-fraction 0.4 \
+  --epochs 5
+`
+
 """
 
 from __future__ import annotations
@@ -93,6 +116,14 @@ class TrainConfig:
     selection_metric: str = "val_balanced_accuracy"
     drop_central_and_questionnaire: bool = True
     optional_drop_labels: tuple[str, ...] = ("central_position", "questionnaire")
+    subset_fraction: float | None = None
+    subset_min_per_class: int = 1
+    subset_seed: int = 42
+    clear_cuda_cache_between_heads: bool = True
+    save_model: bool = True
+    save_metrics: bool = True
+    save_base_embeddings: bool = True
+    save_head_features: bool = True
 
 
 @dataclass(frozen=True)
@@ -110,10 +141,10 @@ class SchemeArtifacts:
 
     scheme: str
     head_type: str
-    model_path: Path
-    head_features_path: Path
-    base_embeddings_path: Path
-    metrics_path: Path
+    model_path: Path | None
+    head_features_path: Path | None
+    base_embeddings_path: Path | None
+    metrics_path: Path | None
 
 
 class MLPClassificationHead(nn.Module):
@@ -159,6 +190,17 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _maybe_clear_cuda_cache() -> None:
+    """Release cached CUDA memory if CUDA is available."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _state_dict_to_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Return model state dict cloned onto CPU."""
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 def _confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> np.ndarray:
@@ -538,9 +580,18 @@ def train_one_head(
         weight_decay=train_config.weight_decay,
     )
 
+    # Initialize any lazy modules before taking the initial best-state snapshot.
+    first_batch = next(iter(train_loader))
+    with torch.no_grad():
+        _ = model(
+            x_enc=first_batch[0].to(device),
+            input_mask=first_batch[1].to(device),
+            reduction="mean",
+        )
+
     best_val = -1.0
     best_epoch = 0
-    best_state = copy.deepcopy(model.state_dict())
+    best_state = _state_dict_to_cpu(model)
     bad_epochs = 0
 
     for epoch in range(1, train_config.epochs + 1):
@@ -571,7 +622,7 @@ def train_one_head(
         if val_score > best_val + 1e-12:
             best_val = val_score
             best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = _state_dict_to_cpu(model)
             bad_epochs = 0
         else:
             bad_epochs += 1
@@ -601,6 +652,9 @@ def train_one_head(
     }
     metrics["val_balanced_accuracy"] = float(metrics["val"]["balanced_accuracy"])
     metrics["test_balanced_accuracy"] = float(metrics["test"]["balanced_accuracy"])
+
+    model.to("cpu")
+    _maybe_clear_cuda_cache()
 
     return {
         "state_dict": best_state,
@@ -721,6 +775,67 @@ def _copy_best_artifacts(scheme_dir: Path, selected: SchemeArtifacts) -> None:
     shutil.copy2(selected.base_embeddings_path, scheme_dir / "best_base_embeddings.npz")
 
 
+def _stratified_subset_indices(
+    labels: np.ndarray,
+    fraction: float | None,
+    seed: int,
+    min_per_class: int = 1,
+) -> np.ndarray:
+    """Return stratified subset indices; keep all rows if fraction is None or >=1."""
+    if fraction is None or fraction >= 1.0:
+        return np.arange(labels.shape[0], dtype=np.int64)
+    if fraction <= 0.0:
+        raise ValueError(f"subset_fraction must be in (0, 1], got {fraction}")
+    if min_per_class < 1:
+        raise ValueError(f"subset_min_per_class must be >=1, got {min_per_class}")
+
+    rng = np.random.default_rng(seed)
+    keep: list[np.ndarray] = []
+    labels = labels.astype(str)
+    for label in sorted(np.unique(labels).tolist()):
+        class_idx = np.flatnonzero(labels == label)
+        target_n = int(round(class_idx.size * fraction))
+        target_n = max(min_per_class, target_n)
+        target_n = min(target_n, class_idx.size)
+        sampled = rng.choice(class_idx, size=target_n, replace=False)
+        keep.append(np.sort(sampled))
+    out = np.sort(np.concatenate(keep, axis=0).astype(np.int64))
+    return out
+
+
+def _config_value(defaults: dict[str, Any], key: str, fallback: Any) -> Any:
+    return defaults.get(key, fallback)
+
+
+def _csv_default(defaults: dict[str, Any], key: str, fallback: str) -> str:
+    value = defaults.get(key, fallback)
+    if isinstance(value, (list, tuple)):
+        return ",".join([str(x) for x in value])
+    return str(value)
+
+
+def _path_default(defaults: dict[str, Any], key: str, fallback: Path) -> Path:
+    value = defaults.get(key, fallback)
+    return value if isinstance(value, Path) else Path(str(value))
+
+
+def _load_yaml_config(config_path: Path) -> dict[str, Any]:
+    """Load YAML config file for this pipeline."""
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config YAML not found: {config_path}")
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError(
+            "PyYAML is required for config files. Install it in `moment4ET` (e.g. `pip install pyyaml`)."
+        ) from exc
+    with config_path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Config root must be a mapping, got {type(payload)}")
+    return payload
+
+
 def _run_rebuild_if_requested(args: argparse.Namespace) -> None:
     if not args.rebuild_inputs:
         return
@@ -740,7 +855,12 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     """Run dual-head fine-tuning and export pipeline."""
     _seed_everything(args.seed)
     LOGGER.info(
-        "Starting head fine-tuning pipeline \n   input_dir=%s\n   out_dir=%s \n   schemes=%s \n   heads=%s \n   device=%s",
+        "Starting head fine-tuning pipeline \n" \
+        "                               input_dir=%s\n" \
+        "                               out_dir=%s \n" \
+        "                               schemes=%s \n" \
+        "                               heads=%s \n" \
+        "                               device=%s",
         args.input_dir,
         args.out_dir,
         args.schemes,
@@ -751,7 +871,10 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     x, input_mask, metadata = _load_cached_inputs(args.input_dir)
     LOGGER.info(
-        "Loaded cached inputs | n_segments=%d x_shape=%s mask_shape=%s",
+        "Loaded cached inputs | \n" \
+        "                           n_segments=%d\n" \
+        "                           x_shape=%s\n" \
+        "                           mask_shape=%s",
         x.shape[0],
         tuple(x.shape),
         tuple(input_mask.shape),
@@ -777,18 +900,25 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         mlp_hidden_dim=args.mlp_hidden_dim,
         mlp_dropout=args.mlp_dropout,
         drop_central_and_questionnaire=args.drop_central_and_questionnaire,
+        subset_fraction=args.subset_fraction,
+        subset_min_per_class=args.subset_min_per_class,
+        subset_seed=args.subset_seed,
+        clear_cuda_cache_between_heads=args.clear_cuda_cache_between_heads,
     )
 
     run_manifest: dict[str, Any] = {
         "pipeline_version": PIPELINE_VERSION,
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "config_path": str(args.config),
         "input_dir": str(args.input_dir),
         "out_dir": str(out_dir),
         "config": asdict(train_config),
         "schemes": {},
     }
 
-    for scheme in train_config.schemes:
+    for scheme_idx, scheme in enumerate(train_config.schemes):
+        LOGGER.info("")
+        LOGGER.info("*"*50)
         LOGGER.info("Processing scheme=%s", scheme)
         scheme_df = metadata.copy()
         scheme_df["row_idx"] = np.arange(scheme_df.shape[0], dtype=np.int64)
@@ -800,6 +930,24 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         )
         if scheme_df.empty:
             raise ValueError(f"No rows remained after applying scheme={scheme}")
+
+        subset_idx = _stratified_subset_indices(
+            labels=scheme_df["scheme_label"].to_numpy(dtype=str),
+            fraction=train_config.subset_fraction,
+            seed=train_config.subset_seed + scheme_idx,
+            min_per_class=train_config.subset_min_per_class,
+        )
+        if subset_idx.size < scheme_df.shape[0]:
+            original_n = int(scheme_df.shape[0])
+            scheme_df = scheme_df.iloc[subset_idx].reset_index(drop=True)
+            LOGGER.info(
+                "Scheme=%s stratified subset active | kept=%d/%d (%.2f%%) fraction=%.4f",
+                scheme,
+                scheme_df.shape[0],
+                original_n,
+                100.0 * scheme_df.shape[0] / max(original_n, 1),
+                float(train_config.subset_fraction or 1.0),
+            )
 
         scheme_row_idx = scheme_df["row_idx"].to_numpy(dtype=np.int64)
         x_scheme = x[scheme_row_idx]
@@ -853,7 +1001,6 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                 labels=label_int,
                 split_indices=split_indices,
             )
-            head_results[head_type] = result
 
             artifacts = export_head_artifacts(
                 scheme_dir=scheme_dir,
@@ -874,7 +1021,10 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                 "test_balanced_accuracy": float(result["metrics"]["test_balanced_accuracy"]),
                 "metrics_path": str(artifacts.metrics_path),
             }
-
+            head_results[head_type] = {"metrics": result["metrics"]}
+            del result
+            if train_config.clear_cuda_cache_between_heads:
+                _maybe_clear_cuda_cache()
         best_head = choose_best_head(head_results)
         selected = head_artifacts[best_head]
         _copy_best_artifacts(scheme_dir=scheme_dir, selected=selected)
@@ -917,35 +1067,60 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     return out_dir
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def build_arg_parser(
+    config_defaults: dict[str, Any] | None = None,
+    default_config_path: Path = Path("trustME/configs/finetune_imwut_heads.full.yaml"),
+) -> argparse.ArgumentParser:
     """Build CLI parser for head-only fine-tuning pipeline."""
+    defaults = config_defaults or {}
     parser = argparse.ArgumentParser(description="IMWUT head-only MOMENT fine-tuning and dual-head export.")
-    parser.add_argument("--input-dir", type=Path, default=Path("trustME/data/processed/imwut_tobii"))
-    parser.add_argument("--raw-root", type=Path, default=Path("trustME/data/raw/imwut"))
-    parser.add_argument("--seg-csv", type=Path, default=None)
-    parser.add_argument("--rebuild-inputs", action="store_true")
-    parser.add_argument("--schemes", type=str, default="binary,edr,avm")
-    parser.add_argument("--head-types", type=str, default="linear,mlp")
-    parser.add_argument("--model-name", type=str, default="AutonLab/MOMENT-1-large")
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--patience", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--subject-train-frac", type=float, default=0.70)
-    parser.add_argument("--subject-val-frac", type=float, default=0.15)
-    parser.add_argument("--subject-test-frac", type=float, default=0.15)
-    parser.add_argument("--mlp-hidden-dim", type=int, default=256)
-    parser.add_argument("--mlp-dropout", type=float, default=0.1)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--out-dir", type=Path, default=Path("trustME/data/processed/imwut_tobii_finetuned"))
+    parser.add_argument("--config", type=Path, default=default_config_path)
+    parser.add_argument("--input-dir", type=Path, default=_path_default(defaults, "input_dir", Path("trustME/data/processed/imwut_tobii")))
+    parser.add_argument("--raw-root", type=Path, default=_path_default(defaults, "raw_root", Path("trustME/data/raw/imwut")))
+    parser.add_argument("--seg-csv", type=Path, default=_path_default(defaults, "seg_csv", Path("")) if defaults.get("seg_csv") else None)
+    parser.add_argument("--rebuild-inputs", action="store_true", default=bool(_config_value(defaults, "rebuild_inputs", False)))
+    parser.add_argument("--schemes", type=str, default=_csv_default(defaults, "schemes", "binary,edr,avm"))
+    parser.add_argument("--head-types", type=str, default=_csv_default(defaults, "head_types", "linear,mlp"))
+    parser.add_argument("--model-name", type=str, default=str(_config_value(defaults, "model_name", "AutonLab/MOMENT-1-large")))
+    parser.add_argument("--batch-size", type=int, default=int(_config_value(defaults, "batch_size", 64)))
+    parser.add_argument("--epochs", type=int, default=int(_config_value(defaults, "epochs", 10)))
+    parser.add_argument("--patience", type=int, default=int(_config_value(defaults, "patience", 3)))
+    parser.add_argument("--lr", type=float, default=float(_config_value(defaults, "lr", 1e-4)))
+    parser.add_argument("--weight-decay", type=float, default=float(_config_value(defaults, "weight_decay", 1e-4)))
+    parser.add_argument("--seed", type=int, default=int(_config_value(defaults, "seed", 42)))
+    parser.add_argument("--device", type=str, default=str(_config_value(defaults, "device", "auto")))
+    parser.add_argument("--subject-train-frac", type=float, default=float(_config_value(defaults, "subject_train_frac", 0.70)))
+    parser.add_argument("--subject-val-frac", type=float, default=float(_config_value(defaults, "subject_val_frac", 0.15)))
+    parser.add_argument("--subject-test-frac", type=float, default=float(_config_value(defaults, "subject_test_frac", 0.15)))
+    parser.add_argument("--mlp-hidden-dim", type=int, default=int(_config_value(defaults, "mlp_hidden_dim", 256)))
+    parser.add_argument("--mlp-dropout", type=float, default=float(_config_value(defaults, "mlp_dropout", 0.1)))
+    parser.add_argument("--subset-fraction", type=float, default=_config_value(defaults, "subset_fraction", None))
+    parser.add_argument("--subset-min-per-class", type=int, default=int(_config_value(defaults, "subset_min_per_class", 1)))
+    parser.add_argument("--subset-seed", type=int, default=int(_config_value(defaults, "subset_seed", 42)))
+    parser.add_argument("--num-workers", type=int, default=int(_config_value(defaults, "num_workers", 0)))
+    parser.add_argument(
+        "--clear-cuda-cache-between-heads",
+        dest="clear_cuda_cache_between_heads",
+        action="store_true",
+        default=bool(_config_value(defaults, "clear_cuda_cache_between_heads", True)),
+        help="Call `torch.cuda.empty_cache()` after each head training stage (default).",
+    )
+    parser.add_argument(
+        "--no-clear-cuda-cache-between-heads",
+        dest="clear_cuda_cache_between_heads",
+        action="store_false",
+        help="Disable CUDA cache clearing between heads.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=_path_default(defaults, "out_dir", Path("trustME/data/processed/imwut_tobii_finetuned")),
+    )
     parser.add_argument(
         "--drop-central-and-questionnaire",
         dest="drop_central_and_questionnaire",
         action="store_true",
-        default=True,
+        default=bool(_config_value(defaults, "drop_central_and_questionnaire", True)),
         help="Drop `central_position` and `questionnaire` before label scheme mapping (default).",
     )
     parser.add_argument(
@@ -954,13 +1129,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Retain `central_position` and `questionnaire` instead of dropping them.",
     )
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--verbose", action="store_true", default=bool(_config_value(defaults, "verbose", False)))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint."""
-    parser = build_arg_parser()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=Path, default=Path("trustME/configs/finetune_imwut_heads.full.yaml"))
+    pre_args, _ = pre_parser.parse_known_args(argv)
+    config_defaults = _load_yaml_config(pre_args.config)
+
+    parser = build_arg_parser(config_defaults=config_defaults, default_config_path=pre_args.config)
     args = parser.parse_args(argv)
     _setup_logging(verbose=args.verbose)
     args.schemes = _parse_csv_list(args.schemes)
