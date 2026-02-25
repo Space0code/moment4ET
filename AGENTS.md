@@ -18,6 +18,7 @@
 - Make randomness, I/O, and assumptions explicit
 - Avoid data leakage and hidden side effects
 - Prefer readable vectorization over premature optimization
+- When plotting confusion matrices, we should normalize each row to show per-class percentages (values between 0.0 and 1.0) and fix the color scale to the [0, 1] range.
 
 ## Conda environment
 - We always use conda environments.
