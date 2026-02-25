@@ -6,7 +6,7 @@ out_dir: trustME/data/processed/imwut_tobii_finetuned_penultimate # output folde
 
 schemes:
   # supported values: "binary", "edr", "avm"
-  # - binary
+  - binary
   - edr
   - avm
 
@@ -41,13 +41,13 @@ mlp_hidden_dim: 256 # int >= 1; used only when head_type == "mlp"
 mlp_dropout: 0.1 # float in [0,1]; used only when head_type == "mlp"
 
 encoder_tune_scope: last_n_blocks # "last_n_layernorm", "last_n_mlp", "last_n_blocks"
-unfreeze_last_n_blocks: 1 # int >= 1 and <= number of encoder blocks
+unfreeze_last_n_blocks: 2 # int >= 1 and <= number of encoder blocks
 
 # Fast defaults: save only embeddings + metrics.
-save_model_weights: false # true | false
+save_model_weights: true # true | false
 save_embeddings: true # true | false
 save_metrics: true # true | false
-save_predictions: false # true | false
+save_predictions: true # true | false
 weights_format: trainable_only # "trainable_only" | "full" (used when save_model_weights: true)
 
 verbose: false # true | false
