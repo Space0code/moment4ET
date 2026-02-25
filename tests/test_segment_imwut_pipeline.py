@@ -241,6 +241,9 @@ def test_compute_embeddings_preserves_segment_alignment(tmp_path: Path, monkeypa
             assert model_kwargs["task_name"] == "embedding"
             return cls()
 
+        def init(self) -> "FakePipeline":
+            return self
+
         def to(self, device: str) -> "FakePipeline":
             _ = device
             return self

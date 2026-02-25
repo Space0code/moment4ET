@@ -1,0 +1,46 @@
+# Full profile for trustME/source/finetune_imwut_penultimate.py
+# Purpose: primary run on full (post-filtered) processed IMWUT data.
+
+input_dir: trustME/data/processed/imwut_tobii # path to folder containing moment_inputs.npz and segments_metadata.parquet
+out_dir: trustME/data/processed/imwut_tobii_finetuned_penultimate # output folder for per-scheme artifacts + run_manifest.json
+
+schemes:
+  # supported values: "binary", "edr", "avm"
+  - binary
+  - edr
+  - avm
+
+model_name: AutonLab/MOMENT-1-large # Hugging Face MOMENT checkpoint name
+batch_size: 128 # int >= 1
+epochs: 30 # int >= 1
+patience: 6 # int >= 1 (early-stopping patience on val balanced accuracy)
+lr: 0.0001 # float > 0
+weight_decay: 0.0001 # float >= 0
+seed: 42 # int
+device: auto # "auto" | "cpu" | "cuda"
+num_workers: 4 # int >= 0 (PyTorch DataLoader workers)
+
+subject_train_frac: 0.70 # float in (0,1); train+val+test must sum to 1.0
+subject_val_frac: 0.15 # float in (0,1)
+subject_test_frac: 0.15 # float in (0,1)
+
+# Use all samples unless explicitly reduced.
+subset_fraction: null # null or float in (0,1]; null/1.0 means use all rows
+subset_min_per_class: 1 # int >= 1; minimum sampled rows per class when subsetting
+subset_seed: 42 # int
+
+head_type: mlp # "linear" | "mlp"
+mlp_hidden_dim: 256 # int >= 1; used only when head_type == "mlp"
+mlp_dropout: 0.1 # float in [0,1]; used only when head_type == "mlp"
+
+encoder_tune_scope: last_n_blocks # "last_n_layernorm", "last_n_mlp", "last_n_blocks"
+unfreeze_last_n_blocks: 1 # int >= 1 and <= number of encoder blocks
+
+# Fast defaults: save only embeddings + metrics.
+save_model_weights: false # true | false
+save_embeddings: true # true | false
+save_metrics: true # true | false
+save_predictions: false # true | false
+weights_format: trainable_only # "trainable_only" | "full" (used when save_model_weights: true)
+
+verbose: false # true | false
