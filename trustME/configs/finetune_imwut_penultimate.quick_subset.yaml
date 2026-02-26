@@ -35,6 +35,7 @@ subject_test_frac: 0.15 # float in (0,1)
 subset_fraction: 0.10 # null or float in (0,1]; null/1.0 means use all rows
 subset_min_per_class: 8 # int >= 1; minimum sampled rows per class when subsetting
 subset_seed: 42 # int
+input_normalization: none # NOTE: keep none by default; RevIN already does per-sample standardization. Set train_global_standard only if you intentionally want extra scaling.
 
 head_type: mlp # "linear" | "mlp"
 mlp_hidden_dim: 256 # int >= 1; used only when head_type == "mlp"

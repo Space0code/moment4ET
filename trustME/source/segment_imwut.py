@@ -39,7 +39,9 @@ class SegmentConfig:
     max_invalid_frames: int = 60
     min_valid_fraction: float = 0.3
     min_valid_frames: int = 64
-    normalize: str = "per_segment_zscore"
+    # NOTE: Keep external normalization off by default because MOMENT RevIN
+    # already applies per-sample (segment-wise), mask-aware standardization.
+    normalize: str = "none"
     modality: str = "tobii"
     excluded_labels: tuple[str, ...] = ("questionnaire", "central_position")
 
@@ -189,6 +191,8 @@ def _process_segment(
 
     win = signals.to_numpy(dtype=np.float32).T
     if config.normalize == "per_segment_zscore":
+        # NOTE: This external scaling is opt-in only; RevIN already standardizes
+        # each sample inside MOMENT.
         mean = win.mean(axis=1, keepdims=True)
         std = win.std(axis=1, keepdims=True) + 1e-8
         win = (win - mean) / std
@@ -625,7 +629,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-invalid-frames", type=int, default=60)
     parser.add_argument("--min-valid-fraction", type=float, default=0.3)
     parser.add_argument("--min-valid-frames", type=int, default=32)
-    parser.add_argument("--normalize", type=str, default="per_segment_zscore", choices=["per_segment_zscore", "none"])
+    parser.add_argument(
+        "--normalize",
+        type=str,
+        default="none",
+        choices=["per_segment_zscore", "none"],
+        help=(
+            "External preprocessing normalization. "
+            "NOTE: keep 'none' unless you intentionally want extra scaling; "
+            "MOMENT RevIN already does per-sample standardization."
+        ),
+    )
     parser.add_argument("--modality", type=str, default="tobii")
     parser.add_argument(
         "--excluded-labels",
