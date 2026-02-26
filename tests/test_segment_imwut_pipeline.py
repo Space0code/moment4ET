@@ -14,7 +14,7 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "trustME" / "source" / "segment_imwut.py"
+MODULE_PATH = REPO_ROOT / "trustME_CLUES" / "source" / "segment_imwut.py"
 
 
 def _load_module() -> ModuleType:
@@ -240,6 +240,9 @@ def test_compute_embeddings_preserves_segment_alignment(tmp_path: Path, monkeypa
         def from_pretrained(cls, model_name: str, model_kwargs: dict[str, str]) -> "FakePipeline":
             assert model_kwargs["task_name"] == "embedding"
             return cls()
+
+        def init(self) -> "FakePipeline":
+            return self
 
         def to(self, device: str) -> "FakePipeline":
             _ = device
