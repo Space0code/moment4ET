@@ -1,0 +1,53 @@
+{
+  "artifacts": {
+    "moment_embeddings": {
+      "path": "trustME/data/processed/imwut_tobii/moment_embeddings.npz",
+      "sha256": "4a588b0401af67b0aebed4c88d0f4bedc4762799ab1646c7f13c35694bd20479"
+    },
+    "moment_inputs": {
+      "path": "trustME/data/processed/imwut_tobii/moment_inputs.npz",
+      "sha256": "8988af3ebded598259d220983f74bf3945f049b704e57de5a2b066b98348ad89"
+    },
+    "segments_metadata": {
+      "path": "trustME/data/processed/imwut_tobii/segments_metadata.parquet",
+      "sha256": "80db18eb000845d27aaaab02320cfede7dbe49f4d9e578adcd0320f38cd550df"
+    }
+  },
+  "config": {
+    "channels": [
+      "GazePointX",
+      "GazePointY",
+      "PupilSizeLeft",
+      "PupilSizeRight"
+    ],
+    "excluded_labels": [
+      "questionnaire",
+      "central_position"
+    ],
+    "max_invalid_frames": 60,
+    "min_valid_fraction": 0.3,
+    "min_valid_frames": 32,
+    "modality": "tobii",
+    "normalize": "per_segment_zscore",
+    "seq_len": 512
+  },
+  "config_hash": "075c28e643ae9a380da5e3d55466f55643589bfb776fb05fcb055712c3a90731",
+  "counts": {
+    "segments_dropped": 7253,
+    "segments_kept": 10110,
+    "segments_total_filtered": 17363
+  },
+  "generated_at_utc": "2026-02-24T12:40:02.883168+00:00",
+  "model": {
+    "batch_size": 64,
+    "computed_embeddings": true,
+    "device": "auto",
+    "name": "AutonLab/MOMENT-1-large",
+    "reduction": "mean",
+    "task_name": "embedding"
+  },
+  "out_dir": "trustME/data/processed/imwut_tobii",
+  "pipeline_version": "1.0.0",
+  "raw_root": "trustME/data/raw/imwut",
+  "seg_csv": "trustME/data/raw/imwut/all_segments.csv"
+}

@@ -6,12 +6,12 @@ This script fine-tunes one classification model per label scheme (`binary`,
 Examples
 --------
 # Quick subset run from YAML profile
-python trustME/source/finetune_imwut_penultimate.py \
-  --config trustME/configs/finetune_imwut_penultimate.quick_subset.yaml
+python trustME_CLUES/source/finetune_imwut_penultimate.py \
+  --config trustME_CLUES/configs/finetune_imwut_penultimate.quick_subset.yaml
 
 # Full run with CLI overrides
-python trustME/source/finetune_imwut_penultimate.py \
-  --config trustME/configs/finetune_imwut_penultimate.full.yaml \
+python trustME_CLUES/source/finetune_imwut_penultimate.py \
+  --config trustME_CLUES/configs/finetune_imwut_penultimate.full.yaml \
   --encoder-tune-scope last_n_layernorm \
   --unfreeze-last-n-blocks 1 \
   --epochs 5
@@ -1293,7 +1293,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
 def build_arg_parser(
     config_defaults: dict[str, Any] | None = None,
-    default_config_path: Path = Path("trustME/configs/finetune_imwut_penultimate.full.yaml"),
+    default_config_path: Path = Path("trustME_CLUES/configs/finetune_imwut_penultimate.full.yaml"),
 ) -> argparse.ArgumentParser:
     """Build CLI parser for penultimate-layer fine-tuning pipeline."""
     defaults = config_defaults or {}
@@ -1302,12 +1302,12 @@ def build_arg_parser(
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=_path_default(defaults, "input_dir", Path("trustME/data/processed/imwut_tobii")),
+        default=_path_default(defaults, "input_dir", Path("trustME_CLUES/data/processed/imwut_tobii")),
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=_path_default(defaults, "out_dir", Path("trustME/data/processed/imwut_tobii_finetuned_penultimate")),
+        default=_path_default(defaults, "out_dir", Path("trustME_CLUES/data/processed/imwut_tobii_finetuned_penultimate")),
     )
     parser.add_argument("--schemes", type=str, default=_csv_default(defaults, "schemes", "binary,edr,avm"))
     parser.add_argument("--model-name", type=str, default=str(_config_value(defaults, "model_name", "AutonLab/MOMENT-1-large")))
@@ -1424,7 +1424,7 @@ def build_arg_parser(
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint."""
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", type=Path, default=Path("trustME/configs/finetune_imwut_penultimate.full.yaml"))
+    pre_parser.add_argument("--config", type=Path, default=Path("trustME_CLUES/configs/finetune_imwut_penultimate.full.yaml"))
     pre_args, _ = pre_parser.parse_known_args(argv)
     config_defaults = _load_yaml_config(pre_args.config)
 

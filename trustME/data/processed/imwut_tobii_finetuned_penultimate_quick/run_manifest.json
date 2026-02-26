@@ -1,0 +1,68 @@
+{
+  "config": {
+    "batch_size": 64,
+    "device": "auto",
+    "encoder_tune_scope": "last_n_blocks",
+    "epochs": 15,
+    "head_type": "mlp",
+    "lr": 0.0002,
+    "mlp_dropout": 0.1,
+    "mlp_hidden_dim": 256,
+    "model_name": "AutonLab/MOMENT-1-large",
+    "num_workers": 4,
+    "patience": 5,
+    "save_embeddings": true,
+    "save_metrics": true,
+    "save_model_weights": false,
+    "save_predictions": false,
+    "schemes": [
+      "avm"
+    ],
+    "seed": 42,
+    "subject_test_frac": 0.15,
+    "subject_train_frac": 0.7,
+    "subject_val_frac": 0.15,
+    "subset_fraction": 0.1,
+    "subset_min_per_class": 8,
+    "subset_seed": 42,
+    "unfreeze_last_n_blocks": 1,
+    "weight_decay": 0.0001,
+    "weights_format": "trainable_only"
+  },
+  "config_path": "trustME/configs/finetune_imwut_penultimate.quick_subset.yaml",
+  "generated_at_utc": "2026-02-25T14:21:49.005809+00:00",
+  "input_dir": "trustME/data/processed/imwut_tobii",
+  "out_dir": "trustME/data/processed/imwut_tobii_finetuned_penultimate_quick",
+  "pipeline_version": "1.0.0",
+  "schemes": {
+    "avm": {
+      "artifacts": {
+        "embeddings": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate_quick/avm/embeddings.npz",
+          "sha256": "dc3842a7aaf8321814687ed61258c7386d6562e961aae2b89003e9ece6671664"
+        },
+        "metrics": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate_quick/avm/metrics.json",
+          "sha256": "c557b53d4bf3049add3920ab80dbd2a7c02a8013bf9d87e2398ea4ec43393c4f"
+        }
+      },
+      "classes": [
+        "attention_task",
+        "memory_task",
+        "visual_task"
+      ],
+      "encoder_tune_scope": "last_n_blocks",
+      "head_type": "mlp",
+      "metrics_summary": {
+        "test_balanced_accuracy": 0.5125448028673835,
+        "val_balanced_accuracy": 0.5478312537136066
+      },
+      "n_samples": 770,
+      "selected_encoder_blocks": [
+        23
+      ],
+      "trainable_parameter_count": 13,
+      "unfreeze_last_n_blocks": 1
+    }
+  }
+}

@@ -1,8 +1,8 @@
-# Full profile for trustME/source/finetune_imwut_penultimate.py
+# Full profile for trustME_CLUES/source/finetune_imwut_penultimate.py
 # Purpose: primary run on full (post-filtered) processed IMWUT data.
 
-input_dir: trustME/data/processed/imwut_tobii # path to folder containing moment_inputs.npz and segments_metadata.parquet
-out_dir: trustME/data/processed/imwut_tobii_finetuned_penultimate # output folder for per-scheme artifacts + run_manifest.json
+input_dir: trustME_CLUES/data/processed/imwut_tobii # path to folder containing moment_inputs.npz and segments_metadata.parquet
+out_dir: trustME_CLUES/data/processed/imwut_tobii_finetuned_penultimate # output folder for per-scheme artifacts + run_manifest.json
 
 schemes:
   # supported values: "binary", "edr", "avm"
@@ -14,7 +14,7 @@ model_name: AutonLab/MOMENT-1-large # Hugging Face MOMENT checkpoint name
 batch_size: 128 # int >= 1
 epochs: 30 # int >= 1
 patience: 6 # int >= 1 (early-stopping patience on val balanced accuracy)
-lr: 0.0001 # float > 0
+lr: 0.0002 # float > 0
 weight_decay: 0.0001 # float >= 0
 seed: 42 # int
 device: cuda # "auto" | "cpu" | "cuda"
