@@ -608,9 +608,9 @@ def _parse_subject_filter(raw_value: str | None) -> set[str] | None:
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build command-line parser for the IMWUT pipeline."""
     parser = argparse.ArgumentParser(description="IMWUT Tobii segmentation and MOMENT embedding pipeline.")
-    parser.add_argument("--raw-root", type=Path, default=Path("trustME/data/raw/imwut"))
+    parser.add_argument("--raw-root", type=Path, default=Path("trustME_CLUES/data/raw/imwut"))
     parser.add_argument("--seg-csv", type=Path, default=None)
-    parser.add_argument("--out-dir", type=Path, default=Path("trustME/data/processed/imwut_tobii"))
+    parser.add_argument("--out-dir", type=Path, default=Path("trustME_CLUES/data/processed/imwut_tobii"))
     parser.add_argument("--model-name", type=str, default="AutonLab/MOMENT-1-large")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", type=str, default="auto")

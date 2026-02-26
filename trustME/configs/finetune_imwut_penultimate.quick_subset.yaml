@@ -1,8 +1,8 @@
-# Quick/debug profile for trustME/source/finetune_imwut_penultimate.py
+# Quick/debug profile for trustME_CLUES/source/finetune_imwut_penultimate.py
 # Purpose: fast iteration with small stratified subset.
 
-input_dir: trustME/data/processed/imwut_tobii # path to folder containing moment_inputs.npz and segments_metadata.parquet
-out_dir: trustME/data/processed/imwut_tobii_finetuned_penultimate_quick # output folder for per-scheme artifacts + run_manifest.json
+input_dir: trustME_CLUES/data/processed/imwut_tobii # path to folder containing moment_inputs.npz and segments_metadata.parquet
+out_dir: trustME_CLUES/data/processed/imwut_tobii_finetuned_penultimate_quick # output folder for per-scheme artifacts + run_manifest.json
 
 schemes:
   # supported values: "binary", "edr", "avm"

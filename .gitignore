@@ -1,6 +1,6 @@
 # For Trust ME
-trustME/data
-!trustME/data/processed/imwut_tobii_finetuned_penultimate/**/embeddings.npz
+trustME_CLUES/data
+!trustME_CLUES/data/processed/imwut_tobii_finetuned_penultimate/**/embeddings.npz
 
 
 

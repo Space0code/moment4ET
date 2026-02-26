@@ -1,0 +1,105 @@
+{
+  "config": {
+    "amp_dtype": "bf16",
+    "batch_size": 128,
+    "device": "cuda",
+    "enable_tf32": true,
+    "encoder_tune_scope": "last_n_blocks",
+    "epochs": 30,
+    "head_type": "mlp",
+    "lr": 0.0001,
+    "mlp_dropout": 0.1,
+    "mlp_hidden_dim": 256,
+    "model_name": "AutonLab/MOMENT-1-large",
+    "non_blocking": true,
+    "num_workers": 4,
+    "patience": 6,
+    "persistent_workers": true,
+    "pin_memory": true,
+    "prefetch_factor": 2,
+    "save_embeddings": true,
+    "save_metrics": true,
+    "save_model_weights": false,
+    "save_predictions": false,
+    "schemes": [
+      "edr",
+      "avm"
+    ],
+    "seed": 42,
+    "subject_test_frac": 0.15,
+    "subject_train_frac": 0.7,
+    "subject_val_frac": 0.15,
+    "subset_fraction": null,
+    "subset_min_per_class": 1,
+    "subset_seed": 42,
+    "unfreeze_last_n_blocks": 1,
+    "use_amp": true,
+    "weight_decay": 0.0001,
+    "weights_format": "trainable_only"
+  },
+  "config_path": "trustME/configs/finetune_imwut_penultimate.full.yaml",
+  "generated_at_utc": "2026-02-25T15:40:46.961364+00:00",
+  "input_dir": "trustME/data/processed/imwut_tobii",
+  "out_dir": "trustME/data/processed/imwut_tobii_finetuned_penultimate",
+  "pipeline_version": "1.0.0",
+  "schemes": {
+    "avm": {
+      "artifacts": {
+        "embeddings": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate/avm/embeddings.npz",
+          "sha256": "5d03d31a4f3f164b4045045624a9d0ef6856cd12915e90c613dd608113d4aad3"
+        },
+        "metrics": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate/avm/metrics.json",
+          "sha256": "77b3a54010e95a7d0324105e308aa67c62efcde711dd1fb38b66ab10920944ec"
+        }
+      },
+      "classes": [
+        "attention_task",
+        "memory_task",
+        "visual_task"
+      ],
+      "encoder_tune_scope": "last_n_blocks",
+      "head_type": "mlp",
+      "metrics_summary": {
+        "test_balanced_accuracy": 0.6075893340947381,
+        "val_balanced_accuracy": 0.6563990965149532
+      },
+      "n_samples": 7704,
+      "selected_encoder_blocks": [
+        23
+      ],
+      "trainable_parameter_count": 13,
+      "unfreeze_last_n_blocks": 1
+    },
+    "edr": {
+      "artifacts": {
+        "embeddings": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate/edr/embeddings.npz",
+          "sha256": "87f98ac6b66420b3fb7c3f46906dbaa26a4b46bf518560e4fe2f258a0586d2f0"
+        },
+        "metrics": {
+          "path": "trustME/data/processed/imwut_tobii_finetuned_penultimate/edr/metrics.json",
+          "sha256": "ee6e5f1316f134f88f828437df3bd8d00d8bdb8ffab7d0118be82fd5cc90edd8"
+        }
+      },
+      "classes": [
+        "high_load",
+        "low_load",
+        "rest"
+      ],
+      "encoder_tune_scope": "last_n_blocks",
+      "head_type": "mlp",
+      "metrics_summary": {
+        "test_balanced_accuracy": 0.43302789802789804,
+        "val_balanced_accuracy": 0.43137200740887377
+      },
+      "n_samples": 10110,
+      "selected_encoder_blocks": [
+        23
+      ],
+      "trainable_parameter_count": 13,
+      "unfreeze_last_n_blocks": 1
+    }
+  }
+}

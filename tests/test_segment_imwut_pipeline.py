@@ -14,7 +14,7 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "trustME" / "source" / "segment_imwut.py"
+MODULE_PATH = REPO_ROOT / "trustME_CLUES" / "source" / "segment_imwut.py"
 
 
 def _load_module() -> ModuleType:

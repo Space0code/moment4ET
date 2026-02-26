@@ -15,7 +15,7 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "trustME" / "source" / "finetune_imwut_penultimate.py"
+MODULE_PATH = REPO_ROOT / "trustME_CLUES" / "source" / "finetune_imwut_penultimate.py"
 
 
 def _load_module() -> ModuleType:
