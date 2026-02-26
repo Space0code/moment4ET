@@ -18,10 +18,13 @@
 - Make randomness, I/O, and assumptions explicit
 - Avoid data leakage and hidden side effects
 - Prefer readable vectorization over premature optimization
+- When plotting confusion matrices, we should normalize each row to show per-class percentages (values between 0.0 and 1.0) and fix the color scale to the [0, 1] range.
+- When creating new python scripts that are meant to be run from terminal, add a concise docstring in the beginning of the script explaining and providing an example on how to run the script and what are the running options. 
+- Ask questions.
 
 ## Conda environment
 - We always use conda environments.
-- When using python, first activate conda environment named `moment`.
+- When using python, first activate conda environment named `moment4ET`.
 
 ## Hardware
 - I have NVIDIA GeForce RTX 4070 with 12282MiB memory
