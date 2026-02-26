@@ -45,6 +45,9 @@ SUPPORTED_SCHEMES = ("binary", "edr", "avm")
 SUPPORTED_HEAD_TYPES = ("linear", "mlp")
 SUPPORTED_ENCODER_TUNE_SCOPES = ("last_n_layernorm", "last_n_mlp", "last_n_blocks")
 SUPPORTED_WEIGHTS_FORMATS = ("trainable_only", "full")
+# NOTE: Keep external input normalization off by default because MOMENT RevIN
+# already performs per-sample, mask-aware standardization.
+SUPPORTED_INPUT_NORMALIZATION = ("none", "train_global_standard")
 FORCED_DROP_LABELS = ("questionnaire", "central_position")
 
 warnings.filterwarnings(
@@ -109,6 +112,9 @@ class TrainConfig:
     subset_fraction: float | None = None
     subset_min_per_class: int = 1
     subset_seed: int = 42
+    # NOTE: Keep "none" unless you intentionally want extra external scaling.
+    # RevIN inside MOMENT already standardizes each sample.
+    input_normalization: str = "none"
     head_type: str = "linear"
     mlp_hidden_dim: int = 256
     mlp_dropout: float = 0.1
@@ -357,6 +363,77 @@ def split_subject_holdout(
         "Failed to find subject holdout split with required class coverage. "
         f"subjects={len(subjects)} classes={sorted(full_label_set)}"
     )
+
+
+def _apply_input_normalization(
+    *,
+    x: np.ndarray,
+    input_mask: np.ndarray,
+    split_indices: SplitIndices,
+    mode: str,
+    eps: float = 1e-8,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Apply optional external input normalization without data leakage.
+
+    `train_global_standard` fits channel-wise mean/std only on train split
+    valid frames (mask==1), then applies the transform to all splits.
+    NOTE: external scaling is off by default because MOMENT RevIN already
+    applies per-sample standardization.
+    """
+    if mode not in SUPPORTED_INPUT_NORMALIZATION:
+        raise ValueError(
+            f"Unsupported input_normalization={mode}. "
+            f"Supported: {list(SUPPORTED_INPUT_NORMALIZATION)}"
+        )
+    if mode == "none":
+        return x, {"mode": "none"}
+
+    train_idx = split_indices.train_idx
+    if train_idx.size <= 0:
+        raise ValueError("Train split is empty, cannot fit global standardization statistics.")
+
+    train_x = x[train_idx]
+    train_mask = input_mask[train_idx].astype(bool)
+    if train_x.ndim != 3:
+        raise ValueError(f"Expected x with shape [N,C,T], got {train_x.shape}")
+    if train_mask.ndim != 2:
+        raise ValueError(f"Expected input_mask with shape [N,T], got {train_mask.shape}")
+    if train_x.shape[0] != train_mask.shape[0] or train_x.shape[2] != train_mask.shape[1]:
+        raise ValueError(
+            "x and input_mask have incompatible shapes for normalization: "
+            f"x={train_x.shape}, input_mask={train_mask.shape}"
+        )
+
+    train_mask_f = train_mask[:, None, :].astype(np.float32)
+    valid_frame_count = float(train_mask_f.sum(dtype=np.float64))
+    if valid_frame_count <= 0.0:
+        raise ValueError("No valid train frames (mask==1), cannot fit normalization statistics.")
+
+    channel_mean = (train_x * train_mask_f).sum(axis=(0, 2), dtype=np.float64) / valid_frame_count
+    centered_train = train_x - channel_mean[None, :, None]
+    channel_var = ((centered_train * centered_train) * train_mask_f).sum(axis=(0, 2), dtype=np.float64) / valid_frame_count
+    channel_std = np.sqrt(np.maximum(channel_var, 0.0))
+    channel_std = np.where(channel_std > eps, channel_std, 1.0)
+
+    x_normalized = (x - channel_mean[None, :, None]) / channel_std[None, :, None]
+    x_normalized = np.where(input_mask[:, None, :].astype(bool), x_normalized, 0.0).astype(np.float32, copy=False)
+
+    stats = {
+        "mode": mode,
+        "n_train_segments": int(train_idx.size),
+        "n_train_valid_frames": int(valid_frame_count),
+        "channel_mean": channel_mean.astype(np.float64).tolist(),
+        "channel_std": channel_std.astype(np.float64).tolist(),
+    }
+    LOGGER.info(
+        "Input normalization=%s fitted on train split: n_train_segments=%d n_train_valid_frames=%d",
+        mode,
+        int(train_idx.size),
+        int(valid_frame_count),
+    )
+    LOGGER.info("Input normalization channel_mean=%s", np.round(channel_mean, 6).tolist())
+    LOGGER.info("Input normalization channel_std=%s", np.round(channel_std, 6).tolist())
+    return x_normalized, stats
 
 
 def _stratified_subset_indices(
@@ -1086,6 +1163,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         subset_fraction=args.subset_fraction,
         subset_min_per_class=args.subset_min_per_class,
         subset_seed=args.subset_seed,
+        input_normalization=args.input_normalization,
         head_type=args.head_type,
         mlp_hidden_dim=args.mlp_hidden_dim,
         mlp_dropout=args.mlp_dropout,
@@ -1159,9 +1237,15 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         split[split_indices.val_idx] = "val"
         split[split_indices.test_idx] = "test"
 
+        x_scheme_normalized, normalization_stats = _apply_input_normalization(
+            x=x_scheme,
+            input_mask=mask_scheme,
+            split_indices=split_indices,
+            mode=config.input_normalization,
+        )
         result = train_one_scheme(
             config=config,
-            x=x_scheme,
+            x=x_scheme_normalized,
             input_mask=mask_scheme,
             labels=label_int,
             split_indices=split_indices,
@@ -1191,6 +1275,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             "encoder_tune_scope": config.encoder_tune_scope,
             "unfreeze_last_n_blocks": config.unfreeze_last_n_blocks,
             "head_type": config.head_type,
+            "input_normalization": normalization_stats,
             "selected_encoder_blocks": result["selected_encoder_blocks"],
             "trainable_parameter_count": int(len(result["trainable_param_names"])),
             "metrics_summary": {
@@ -1277,6 +1362,17 @@ def build_arg_parser(
     parser.add_argument("--subset-fraction", type=float, default=_config_value(defaults, "subset_fraction", None))
     parser.add_argument("--subset-min-per-class", type=int, default=int(_config_value(defaults, "subset_min_per_class", 1)))
     parser.add_argument("--subset-seed", type=int, default=int(_config_value(defaults, "subset_seed", 42)))
+    parser.add_argument(
+        "--input-normalization",
+        type=str,
+        choices=list(SUPPORTED_INPUT_NORMALIZATION),
+        default=str(_config_value(defaults, "input_normalization", "none")),
+        help=(
+            "External input normalization mode. "
+            "NOTE: keep 'none' unless you explicitly want extra scaling; "
+            "MOMENT RevIN already does per-sample standardization."
+        ),
+    )
     parser.add_argument("--head-type", type=str, choices=list(SUPPORTED_HEAD_TYPES), default=str(_config_value(defaults, "head_type", "linear")))
     parser.add_argument("--mlp-hidden-dim", type=int, default=int(_config_value(defaults, "mlp_hidden_dim", 256)))
     parser.add_argument("--mlp-dropout", type=float, default=float(_config_value(defaults, "mlp_dropout", 0.1)))
