@@ -72,6 +72,7 @@ class SegmentConfig:
     # Keep external normalization off by default; MOMENT RevIN standardizes per sample.
     normalize: str = "none"
     label_column: str = "sleep_feedback"
+    require_label: bool = False
 
 
 @dataclass
@@ -435,6 +436,14 @@ def build_trustme_window_inputs(
                 label_values = {col: _window_scalar(window_df=window_df, column=col, segment_id=segment_id) for col in EXTRA_LABEL_COLUMNS}
                 label_value = label_values.get(config.label_column, np.nan)
 
+                if config.require_label and pd.isna(label_value):
+                    total_dropped += 1
+                    subject_dropped += 1
+                    drop_reason = "missing_label"
+                    drop_reason_counts[drop_reason] = drop_reason_counts.get(drop_reason, 0) + 1
+                    subject_drop_reasons[drop_reason] = subject_drop_reasons.get(drop_reason, 0) + 1
+                    continue
+
                 ts_series = window_df["TimeStamp"].dropna() if "TimeStamp" in window_df.columns else pd.Series(dtype=float)
                 if ts_series.empty:
                     start_t = np.nan
@@ -624,6 +633,9 @@ def run_pipeline(
 
     inputs_path = out_dir / "moment_inputs.npz"
     embeddings_path = out_dir / "moment_embeddings.npz"
+    metadata_path = out_dir / "segments_metadata.parquet"
+    metadata = pd.read_parquet(metadata_path)
+
     if not skip_embedding:
         compute_moment_embeddings(
             input_npz=inputs_path,
@@ -635,9 +647,6 @@ def run_pipeline(
         )
     else:
         LOGGER.info("Skipping embedding stage (--skip-embedding)")
-
-    metadata_path = out_dir / "segments_metadata.parquet"
-    metadata = pd.read_parquet(metadata_path)
 
     manifest = {
         "pipeline_version": PIPELINE_VERSION,
@@ -682,8 +691,8 @@ def run_pipeline(
             "sha256": _sha256_file(embeddings_path),
         }
 
-    manifest_path = _write_manifest(manifest=manifest, out_dir=out_dir)
-    LOGGER.info("Saved manifest: %s", manifest_path)
+    written_manifest_path = _write_manifest(manifest=manifest, out_dir=out_dir)
+    LOGGER.info("Saved manifest: %s", written_manifest_path)
     return out_dir
 
 
@@ -746,6 +755,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=list(EXTRA_LABEL_COLUMNS),
         help="Column to copy into canonical metadata `Label`.",
     )
+    parser.add_argument(
+        "--require-label",
+        action="store_true",
+        help="Keep only windows where --label-column is non-null.",
+    )
     return parser
 
 
@@ -768,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
         min_valid_frames=parsed.min_valid_frames,
         normalize=parsed.normalize,
         label_column=parsed.label_column,
+        require_label=parsed.require_label,
     )
     subject_filter = _parse_subject_filter(parsed.subjects)
 
