@@ -1,14 +1,22 @@
-"""Trust-me cleaned-windowed Tobii preprocessing and MOMENT embedding pipeline.
+"""Trust-me MOMENT embedding pipeline.
 
-Builds fixed-length MOMENT inputs from `trustME_trustme/data/cleaned_windowed`
-Parquet files (grouped by `window_id`) and computes one embedding per kept window.
+By default, consumes a preprocessed `.npz` cache produced by
+`preprocess_trustme_cache.py` and computes one embedding per kept window.
+Optionally, it can rebuild MOMENT inputs from `cleaned_windowed` parquet files.
 
-Example
--------
+Examples
+--------
+Default cache-first path:
 python trustME_trustme/source/segment_trustme.py \
-  --cleaned-root trustME_trustme/data/cleaned_windowed \
+  --input-npz trustME_trustme/data/cleaned_windowed_preprocessed/trustme_preprocessed_moment_inputs.npz \
   --out-dir trustME_trustme/data/processed/trustme_tobii_0shot \
   --batch-size 64 --device auto --model-name AutonLab/MOMENT-1-large
+
+Legacy rebuild path:
+python trustME_trustme/source/segment_trustme.py \
+  --rebuild-inputs \
+  --cleaned-root trustME_trustme/data/cleaned_windowed \
+  --out-dir trustME_trustme/data/processed/trustme_tobii_0shot
 """
 
 from __future__ import annotations
@@ -30,7 +38,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 LOGGER = logging.getLogger(__name__)
-PIPELINE_VERSION = "1.1.0"
+PIPELINE_VERSION = "1.2.0"
 VALIDITY_COLUMNS = (
     "ValidityLeft",
     "ValidityRight",
@@ -279,6 +287,53 @@ def _write_manifest(manifest: dict[str, Any], out_dir: Path) -> Path:
     return manifest_path
 
 
+def _parse_cache_manifest(cache_payload: np.lib.npyio.NpzFile) -> dict[str, Any] | None:
+    """Parse optional JSON manifest embedded in cache npz payload."""
+    if "manifest_json" not in cache_payload.files:
+        return None
+    try:
+        raw_value = cache_payload["manifest_json"]
+        if isinstance(raw_value, np.ndarray):
+            manifest_text = str(raw_value.item()) if raw_value.ndim == 0 else "".join(raw_value.astype(str).tolist())
+        else:
+            manifest_text = str(raw_value)
+        parsed = json.loads(manifest_text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        LOGGER.warning("Unable to parse `manifest_json` from cache payload; continuing without it.")
+        return None
+
+
+def _materialize_metadata_from_cache(cache_payload: np.lib.npyio.NpzFile, out_dir: Path) -> Path | None:
+    """Write embedded metadata parquet from cache payload into out_dir, if present."""
+    if "metadata_parquet" not in cache_payload.files:
+        return None
+    metadata_bytes = np.asarray(cache_payload["metadata_parquet"], dtype=np.uint8).tobytes()
+    metadata_path = out_dir / "segments_metadata.parquet"
+    metadata_path.write_bytes(metadata_bytes)
+    return metadata_path
+
+
+def _prepare_inputs_from_cache(input_npz: Path, out_dir: Path) -> tuple[Path, Path | None, dict[str, Any] | None]:
+    """Validate cache payload and materialize optional metadata sidecar."""
+    if not input_npz.exists():
+        raise FileNotFoundError(
+            f"Missing input npz cache: {input_npz}. "
+            "Generate it with `preprocess_trustme_cache.py` or pass `--rebuild-inputs`."
+        )
+    if not input_npz.is_file():
+        raise FileNotFoundError(f"Input npz path is not a file: {input_npz}")
+
+    with np.load(input_npz, allow_pickle=False) as cache_payload:
+        required = {"x", "input_mask", "segment_id"}
+        missing = sorted(required - set(cache_payload.files))
+        if missing:
+            raise ValueError(f"Input npz missing required arrays {missing}: {input_npz}")
+        metadata_path = _materialize_metadata_from_cache(cache_payload=cache_payload, out_dir=out_dir)
+        cache_manifest = _parse_cache_manifest(cache_payload=cache_payload)
+    return input_npz, metadata_path, cache_manifest
+
+
 def _ensure_parquet_support() -> None:
     """Ensure parquet IO backend is available."""
     try:
@@ -305,6 +360,21 @@ def _get_parquet_columns(path: Path) -> list[str]:
             return list(fastparquet.ParquetFile(path).columns)
         except Exception as exc:
             raise RuntimeError(f"Failed to read parquet schema for {path}") from exc
+
+
+def _get_parquet_num_rows(path: Path) -> int:
+    """Return row count for parquet file without loading full table when possible."""
+    try:
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        try:
+            import fastparquet
+
+            return int(fastparquet.ParquetFile(path).count())
+        except Exception:
+            return int(len(pd.read_parquet(path)))
 
 
 def _parse_subject_filter(raw_value: str | None) -> set[str] | None:
@@ -545,10 +615,10 @@ def compute_moment_embeddings(
     from momentfm import MOMENTPipeline
 
     LOGGER.info("Computing MOMENT embeddings from %s", input_npz)
-    payload = np.load(input_npz, allow_pickle=False)
-    x = payload["x"].astype(np.float32)
-    input_mask = payload["input_mask"].astype(np.int64)
-    segment_ids = payload["segment_id"].astype(str)
+    with np.load(input_npz, allow_pickle=False) as payload:
+        x = payload["x"].astype(np.float32, copy=False)
+        input_mask = payload["input_mask"].astype(np.int64, copy=False)
+        segment_ids = payload["segment_id"].astype(str, copy=False)
 
     if x.shape[0] != input_mask.shape[0] or x.shape[0] != segment_ids.shape[0]:
         raise ValueError("Input arrays are misaligned in moment_inputs.npz")
@@ -578,15 +648,16 @@ def compute_moment_embeddings(
     model.eval()
 
     dataset = TensorDataset(torch.from_numpy(x).float(), torch.from_numpy(input_mask).long())
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    pin_memory = runtime_device == "cuda"
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory)
     LOGGER.info("Embedding will run in %d batches", len(dataloader))
 
     all_embeddings: list[np.ndarray] = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_idx, (x_batch, mask_batch) in enumerate(dataloader, start=1):
             output = model(
-                x_enc=x_batch.to(runtime_device),
-                input_mask=mask_batch.to(runtime_device),
+                x_enc=x_batch.to(runtime_device, non_blocking=pin_memory),
+                input_mask=mask_batch.to(runtime_device, non_blocking=pin_memory),
                 reduction=reduction,
             )
             if output.embeddings is None:
@@ -607,34 +678,57 @@ def compute_moment_embeddings(
 
 
 def run_pipeline(
-    cleaned_root: Path,
     out_dir: Path,
     config: SegmentConfig,
+    input_npz: Path | None = Path(
+        "trustME_trustme/data/cleaned_windowed_preprocessed/trustme_preprocessed_moment_inputs.npz"
+    ),
+    cleaned_root: Path | None = None,
     model_name: str = "AutonLab/MOMENT-1-large",
     batch_size: int = 64,
     device: str = "auto",
     reduction: str = "mean",
     subject_filter: set[str] | None = None,
     skip_embedding: bool = False,
+    rebuild_inputs: bool = False,
 ) -> Path:
-    """Run full Trust-me cleaned-windowed preprocessing + embedding pipeline."""
+    """Run Trust-me embedding pipeline from cache (default) or rebuilt inputs."""
     _ensure_parquet_support()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    LOGGER.info("Running Trust-me cleaned-windowed Tobii pipeline")
+    LOGGER.info("Running Trust-me Tobii pipeline")
     LOGGER.info("pipeline_out_dir=%s", out_dir)
+    LOGGER.info("input_mode=%s", "rebuild" if rebuild_inputs else "cache")
 
-    _, stats = build_trustme_window_inputs(
-        cleaned_root=cleaned_root,
-        out_dir=out_dir,
-        config=config,
-        subject_filter=subject_filter,
-    )
+    stats: BuildStats | None = None
+    cache_manifest: dict[str, Any] | None = None
+    metadata_path: Path | None = None
+    if rebuild_inputs:
+        if cleaned_root is None:
+            raise ValueError("--cleaned-root must be provided when --rebuild-inputs is enabled.")
+        LOGGER.info("Rebuilding MOMENT inputs from cleaned_root=%s", cleaned_root)
+        _, stats = build_trustme_window_inputs(
+            cleaned_root=cleaned_root,
+            out_dir=out_dir,
+            config=config,
+            subject_filter=subject_filter,
+        )
+        inputs_path = out_dir / "moment_inputs.npz"
+        metadata_path = out_dir / "segments_metadata.parquet"
+    else:
+        if input_npz is None:
+            raise ValueError("--input-npz must be provided unless --rebuild-inputs is enabled.")
+        LOGGER.info("Using preprocessed cache input: %s", input_npz)
+        inputs_path, metadata_path, cache_manifest = _prepare_inputs_from_cache(
+            input_npz=input_npz,
+            out_dir=out_dir,
+        )
+        if metadata_path is not None:
+            LOGGER.info("Materialized metadata from cache to %s", metadata_path)
+        else:
+            LOGGER.warning("No embedded metadata found in cache payload.")
 
-    inputs_path = out_dir / "moment_inputs.npz"
     embeddings_path = out_dir / "moment_embeddings.npz"
-    metadata_path = out_dir / "segments_metadata.parquet"
-    metadata = pd.read_parquet(metadata_path)
 
     if not skip_embedding:
         compute_moment_embeddings(
@@ -648,14 +742,16 @@ def run_pipeline(
     else:
         LOGGER.info("Skipping embedding stage (--skip-embedding)")
 
-    manifest = {
+    metadata_rows = 0
+    if metadata_path is not None and metadata_path.exists():
+        metadata_rows = _get_parquet_num_rows(metadata_path)
+
+    manifest: dict[str, Any] = {
         "pipeline_version": PIPELINE_VERSION,
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
-        "input_dataset": "trustME_trustme/data/cleaned_windowed",
-        "cleaned_root": str(cleaned_root),
+        "input_dataset": "trustME_trustme/data/cleaned_windowed" if rebuild_inputs else "preprocessed_cache_npz",
+        "cleaned_root": str(cleaned_root) if cleaned_root is not None else None,
         "out_dir": str(out_dir),
-        "config": asdict(config),
-        "config_hash": _config_hash(config),
         "model": {
             "name": model_name,
             "task_name": "embedding",
@@ -664,26 +760,63 @@ def run_pipeline(
             "device": device,
             "computed_embeddings": not skip_embedding,
         },
-        "counts": {
-            "segments_total_candidates": int(stats.total_candidates),
-            "segments_kept": int(stats.total_kept),
-            "segments_dropped": int(stats.total_dropped),
-            "drop_reason_counts": stats.drop_reason_counts,
-            "subjects_processed": int(stats.subjects_processed),
-            "parquet_files_processed": int(stats.parquet_files_processed),
-            "metadata_rows": int(len(metadata)),
-        },
         "artifacts": {
-            "segments_metadata": {
-                "path": str(metadata_path),
-                "sha256": _sha256_file(metadata_path),
-            },
             "moment_inputs": {
                 "path": str(inputs_path),
                 "sha256": _sha256_file(inputs_path),
             },
         },
     }
+    if metadata_path is not None and metadata_path.exists():
+        manifest["artifacts"]["segments_metadata"] = {
+            "path": str(metadata_path),
+            "sha256": _sha256_file(metadata_path),
+        }
+
+    if rebuild_inputs:
+        if stats is None:
+            raise RuntimeError("Missing build stats for rebuild mode.")
+        manifest["config"] = asdict(config)
+        manifest["config_hash"] = _config_hash(config)
+        manifest["counts"] = {
+            "segments_total_candidates": int(stats.total_candidates),
+            "segments_kept": int(stats.total_kept),
+            "segments_dropped": int(stats.total_dropped),
+            "drop_reason_counts": stats.drop_reason_counts,
+            "subjects_processed": int(stats.subjects_processed),
+            "parquet_files_processed": int(stats.parquet_files_processed),
+            "metadata_rows": int(metadata_rows),
+        }
+    else:
+        with np.load(inputs_path, allow_pickle=False) as payload:
+            segments_kept = int(payload["x"].shape[0])
+        cache_counts: dict[str, Any] = {}
+        def _cache_int(name: str, default: int) -> int:
+            value = cache_counts.get(name, default)
+            return default if value is None else int(value)
+
+        if cache_manifest is not None and isinstance(cache_manifest.get("counts"), dict):
+            cache_counts = cache_manifest["counts"]
+            manifest["cache_manifest"] = cache_manifest
+        manifest["config"] = (
+            cache_manifest.get("config")
+            if cache_manifest is not None and isinstance(cache_manifest.get("config"), dict)
+            else asdict(config)
+        )
+        manifest["config_hash"] = (
+            str(cache_manifest.get("config_hash"))
+            if cache_manifest is not None and cache_manifest.get("config_hash") is not None
+            else _config_hash(config)
+        )
+        manifest["counts"] = {
+            "segments_total_candidates": _cache_int("segments_total_candidates", segments_kept),
+            "segments_kept": _cache_int("segments_kept", segments_kept),
+            "segments_dropped": _cache_int("segments_dropped", 0),
+            "drop_reason_counts": cache_counts.get("drop_reason_counts", {}),
+            "subjects_processed": _cache_int("subjects_processed", 0),
+            "parquet_files_processed": _cache_int("parquet_files_processed", 0),
+            "metadata_rows": _cache_int("metadata_rows", metadata_rows),
+        }
 
     if embeddings_path.exists():
         manifest["artifacts"]["moment_embeddings"] = {
@@ -697,15 +830,32 @@ def run_pipeline(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Build command-line parser for Trust-me cleaned-windowed pipeline."""
+    """Build command-line parser for Trust-me embedding pipeline."""
     parser = argparse.ArgumentParser(
-        description="Trust-me cleaned-windowed Tobii segmentation and MOMENT embedding pipeline."
+        description=(
+            "Trust-me MOMENT embedding pipeline. "
+            "Uses preprocessed cache npz by default; pass --rebuild-inputs to rebuild from cleaned parquet."
+        )
+    )
+    parser.add_argument(
+        "--input-npz",
+        type=Path,
+        default=Path("trustME_trustme/data/cleaned_windowed_preprocessed/trustme_preprocessed_moment_inputs.npz"),
+        help=(
+            "Preprocessed input cache (.npz) from preprocess_trustme_cache.py. "
+            "Used by default unless --rebuild-inputs is set."
+        ),
+    )
+    parser.add_argument(
+        "--rebuild-inputs",
+        action="store_true",
+        help="Rebuild MOMENT inputs from --cleaned-root parquet data instead of using --input-npz.",
     )
     parser.add_argument(
         "--cleaned-root",
         type=Path,
         default=Path("trustME_trustme/data/cleaned_windowed"),
-        help="Root directory containing per-subject cleaned_windowed Tobii parquet files.",
+        help="Root directory containing per-subject cleaned_windowed Tobii parquet files (used with --rebuild-inputs).",
     )
     parser.add_argument(
         "--out-dir",
@@ -764,7 +914,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint for Trust-me cleaned-windowed pipeline."""
+    """CLI entrypoint for Trust-me embedding pipeline."""
     parser = build_arg_parser()
     parsed = parser.parse_args(argv)
     log_file = parsed.log_file if parsed.log_file is not None else parsed.out_dir / "segment_trustme.log"
@@ -788,20 +938,27 @@ def main(argv: list[str] | None = None) -> int:
 
     LOGGER.info("CLI parsed. verbose=%s", parsed.verbose)
     LOGGER.info("Log file: %s", log_file)
+    LOGGER.info("input_mode=%s", "rebuild" if parsed.rebuild_inputs else "cache")
+    if parsed.rebuild_inputs:
+        LOGGER.info("cleaned_root=%s", parsed.cleaned_root)
+    else:
+        LOGGER.info("input_npz=%s", parsed.input_npz)
 
     started_at = time.perf_counter()
     exit_code = 0
     try:
         run_pipeline(
-            cleaned_root=parsed.cleaned_root,
             out_dir=parsed.out_dir,
             config=config,
+            input_npz=parsed.input_npz,
+            cleaned_root=parsed.cleaned_root,
             model_name=parsed.model_name,
             batch_size=parsed.batch_size,
             device=parsed.device,
             reduction=parsed.reduction,
             subject_filter=subject_filter,
             skip_embedding=parsed.skip_embedding,
+            rebuild_inputs=parsed.rebuild_inputs,
         )
         LOGGER.info("Pipeline completed: %s", parsed.out_dir)
     except Exception:
