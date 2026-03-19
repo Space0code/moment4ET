@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 LOGGER = logging.getLogger(__name__)
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.1.0"
 VALIDITY_COLUMNS = (
     "ValidityLeft",
     "ValidityRight",
@@ -62,6 +63,7 @@ class SegmentConfig:
         "GazePointY",
         "PupilSizeLeft",
         "PupilSizeRight",
+        "AverageDistance",
     )
     max_invalid_frames: int = 60
     min_valid_fraction: float = 0.3
@@ -100,9 +102,34 @@ class BuildStats:
     drop_reason_counts: dict[str, int]
 
 
-def _setup_logging(verbose: bool) -> None:
+def _setup_logging(verbose: bool, log_file: Path | None = None) -> None:
+    """Configure console logging and optional file logging."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    root_logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+
+def _format_duration_hhmmss(total_seconds: float) -> str:
+    """Format elapsed time in HH:MM:SS."""
+    whole_seconds = int(round(total_seconds))
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _sha256_file(path: Path) -> str:
@@ -684,12 +711,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-embedding", action="store_true")
     parser.add_argument("--subjects", type=str, default=None, help="Comma-separated subset, e.g. s_004_pk,s_005_ak")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Path to log file. Default: <out-dir>/segment_trustme.log",
+    )
 
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument(
         "--channels",
         type=str,
-        default="GazePointX,GazePointY,PupilSizeLeft,PupilSizeRight",
+        default="GazePointX,GazePointY,PupilSizeLeft,PupilSizeRight,AverageDistance",
         help="Comma-separated signal channel list.",
     )
     parser.add_argument("--max-invalid-frames", type=int, default=60)
@@ -720,7 +753,8 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for Trust-me cleaned-windowed pipeline."""
     parser = build_arg_parser()
     parsed = parser.parse_args(argv)
-    _setup_logging(verbose=parsed.verbose)
+    log_file = parsed.log_file if parsed.log_file is not None else parsed.out_dir / "segment_trustme.log"
+    _setup_logging(verbose=parsed.verbose, log_file=log_file)
 
     channels = tuple([channel.strip() for channel in parsed.channels.split(",") if channel.strip()])
     if not channels:
@@ -738,19 +772,35 @@ def main(argv: list[str] | None = None) -> int:
     subject_filter = _parse_subject_filter(parsed.subjects)
 
     LOGGER.info("CLI parsed. verbose=%s", parsed.verbose)
-    run_pipeline(
-        cleaned_root=parsed.cleaned_root,
-        out_dir=parsed.out_dir,
-        config=config,
-        model_name=parsed.model_name,
-        batch_size=parsed.batch_size,
-        device=parsed.device,
-        reduction=parsed.reduction,
-        subject_filter=subject_filter,
-        skip_embedding=parsed.skip_embedding,
-    )
-    LOGGER.info("Pipeline completed: %s", parsed.out_dir)
-    return 0
+    LOGGER.info("Log file: %s", log_file)
+
+    started_at = time.perf_counter()
+    exit_code = 0
+    try:
+        run_pipeline(
+            cleaned_root=parsed.cleaned_root,
+            out_dir=parsed.out_dir,
+            config=config,
+            model_name=parsed.model_name,
+            batch_size=parsed.batch_size,
+            device=parsed.device,
+            reduction=parsed.reduction,
+            subject_filter=subject_filter,
+            skip_embedding=parsed.skip_embedding,
+        )
+        LOGGER.info("Pipeline completed: %s", parsed.out_dir)
+    except Exception:
+        exit_code = 1
+        LOGGER.exception("Pipeline failed")
+        raise
+    finally:
+        elapsed_seconds = time.perf_counter() - started_at
+        LOGGER.info(
+            "Total runtime: %s (%d seconds)",
+            _format_duration_hhmmss(elapsed_seconds),
+            int(round(elapsed_seconds)),
+        )
+    return exit_code
 
 
 if __name__ == "__main__":
