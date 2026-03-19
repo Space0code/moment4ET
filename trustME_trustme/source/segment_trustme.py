@@ -9,7 +9,7 @@ Examples
 Default cache-first path:
 python trustME_trustme/source/segment_trustme.py \
   --input-npz trustME_trustme/data/cleaned_windowed_preprocessed/trustme_preprocessed_moment_inputs.npz \
-  --out-dir trustME_trustme/data/processed/trustme_tobii_0shot \
+  --out-dir trustME_trustme/data/processed/embeddings \
   --batch-size 64 --device auto --model-name AutonLab/MOMENT-1-large
 
 Legacy rebuild path:
